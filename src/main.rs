@@ -5,7 +5,7 @@ use std::fs::{File};
 use binrw::{BinReaderExt};
 use std::io::{Seek, SeekFrom};
 
-use include::{read_exact, string_from_bytes, Vdfs4VolumeBegins, Vdfs4SuperBlock, Vdfs4ExtendedSuperBlock, Vdfs4BaseTable, Vdfs4GenNodeDescr, Vdfs4RawBtreeHead, Vdfs4CatTreeKey};
+use include::{read_exact, string_from_bytes, Vdfs4VolumeBegins, Vdfs4SuperBlock, Vdfs4ExtendedSuperBlock, Vdfs4BaseTable, Vdfs4GenNodeDescr, Vdfs4RawBtreeHead, Vdfs4CatTreeKey, Vdfs4CatalogFolderRecord, Vdfs4CatalogFileRecord, Vdfs4CatalogHlinkRecord};
 
 #[derive(Parser, Debug)]
 struct Args {
@@ -133,6 +133,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     else if key.record_type == 0x10 {"VDFS4_CATALOG_UNPACK_INODE"}
                     else {"Unknown"};
                     println!("-- KEY {} - Object ID: {}, Parent ID: {}, Type: {}({}), Name: {}", i, key.object_id, key.parent_id, key.record_type, key_type, key.name_str());
+
+                    if node_descr.node_type == 1 { //special type for root inode?
+                        let _ = read_exact(&mut file, 4); // it has a number only idk what for
+
+                    } else if key_type == "VDFS4_CATALOG_FOLDER_RECORD" {
+                        let folder_record: Vdfs4CatalogFolderRecord = file.read_le()?;
+                        if verbose{println!("{:?}", folder_record)};
+                        println!("--- Flags: {}, Total items count: {}, Links count: {}, File mode: {}, User id: {}, Group id: {}, Creation time: {}",
+                                folder_record.flags, folder_record.total_items_count, folder_record.links_count, folder_record.file_mode, folder_record.user_id, folder_record.group_id, folder_record.creation_time.seconds);
+
+                    } else if key_type == "VDFS4_CATALOG_FILE_RECORD" {
+                        let file_record: Vdfs4CatalogFileRecord = file.read_le()?;
+                        if verbose{println!("{:?}", file_record)};
+                        println!("--- Flags: {}, Total items count: {}, Links count: {}, File mode: {}, User id: {}, Group id: {}, Creation time: {}",
+                                file_record.common.flags, file_record.common.total_items_count, file_record.common.links_count, file_record.common.file_mode, file_record.common.user_id, file_record.common.group_id, file_record.common.creation_time.seconds);
+                        println!("--- Size in bytes: {}, Total blocks count: {}", file_record.data_fork.size_in_bytes, file_record.data_fork.total_blocks_count);
+                        for extent in file_record.data_fork.extents {
+                            if extent.lenght == 0 {break};
+                            println!("--- [EXTENT] Begin: {} ({}), Lenght: {}, iBlock: {}", extent.begin, extent.begin * block_size, extent.lenght, extent.iblock);
+                        }
+
+                    } else if key_type == "VDFS4_CATALOG_HLINK_RECORD" {
+                        let hlink_record: Vdfs4CatalogHlinkRecord = file.read_le()?;
+                        if verbose{println!("{:?}", hlink_record)};
+
+                    }
+                    //ilink record does not store any extra data.
+                    
                 }
                 let new_pos = file.stream_position().unwrap();
                 let diff_pos = new_pos as i64 - pos as i64;

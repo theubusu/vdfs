@@ -142,7 +142,7 @@ pub struct Vdfs4CatTreeKey {
     pub name_len: u8,
     #[br(count = name_len)] pub name: Vec<u8>,
 
-    #[br(count = record_len - name_len as u16 - 26)] _rest: Vec<u8>, //unknown
+    #[br(count = key_len - name_len as u16 - 26)] _padding: Vec<u8>, //all padded to 8 , can be calculated using this. 26 is size of all fields
 }
 impl Vdfs4CatTreeKey {
     pub fn name_str(&self) -> String {
@@ -152,10 +152,28 @@ impl Vdfs4CatTreeKey {
 
 //The eMMCFS stores dates in unsigned 64-bit integer seconds and unsigned 32-bit integer nanoseconds.
 #[derive(BinRead, Debug)]
-struct Vdfs4Timespec {
-    seconds: u32,
-    seconds_high: u32,
-    nanoseconds: u32,
+pub struct Vdfs4Timespec {
+    pub seconds: u32,
+    pub seconds_high: u32,
+    pub nanoseconds: u32,
+}
+
+#[derive(BinRead, Debug)]
+pub struct Vdfs4iExtent {
+    pub begin: u64,     //start block
+    pub lenght: u64,    //length in blocks
+    pub iblock: u64,    //extent start block logical index(???)
+}
+
+static VDFS4_EXTENTS_COUNT_IN_FORK: usize = 9;
+
+//The VDFS4 fork structure.
+#[derive(BinRead, Debug)]
+pub struct Vdfs4Fork {
+    pub size_in_bytes: u64,
+    pub total_blocks_count: u64,
+
+    pub extents: [Vdfs4iExtent; VDFS4_EXTENTS_COUNT_IN_FORK],
 }
 
 //On-disk structure to hold file and folder records.
@@ -179,5 +197,13 @@ pub struct Vdfs4CatalogFolderRecord {
 #[derive(BinRead, Debug)]
 pub struct Vdfs4CatalogFileRecord {
     pub common: Vdfs4CatalogFolderRecord,
+    pub data_fork: Vdfs4Fork,
+}
 
+//On-disk structure to hold hardlink records in catalog btree.
+#[derive(BinRead, Debug)]
+pub struct Vdfs4CatalogHlinkRecord {
+    pub file_mode: u16,
+    _pad1: u16,
+    _pad2: u32,
 }
