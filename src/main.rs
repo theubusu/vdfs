@@ -149,11 +149,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         println!("--- Flags: {}, Total items count: {}, Links count: {}, File mode: {}, User id: {}, Group id: {}, Creation time: {}",
                                 file_record.common.flags, file_record.common.total_items_count, file_record.common.links_count, file_record.common.file_mode, file_record.common.user_id, file_record.common.group_id, file_record.common.creation_time.seconds);
                         println!("--- Size in bytes: {}, Total blocks count: {}", file_record.data_fork.size_in_bytes, file_record.data_fork.total_blocks_count);
-                        for extent in file_record.data_fork.extents {
-                            if extent.lenght == 0 {break};
-                            println!("--- [EXTENT] Begin: {} ({}), Lenght: {}, iBlock: {}", extent.begin, extent.begin * block_size, extent.lenght, extent.iblock);
-                        }
 
+                        if (file_record.common.flags & (1 << 19 /*VDFS4_INLINE_DATA_FILE*/)) != 0 { //INLINE FILE
+                            println!("--- [INLINE FILE]");
+                        } else {
+                            for extent in file_record.data_fork.extents {
+                                if extent.lenght == 0 {break};
+                                println!("--- [EXTENT] Begin: {} ({}), Lenght: {}, iBlock: {}", extent.begin, extent.begin * block_size, extent.lenght, extent.iblock);
+                            }
+                        }
                     } else if key_type == "VDFS4_CATALOG_HLINK_RECORD" {
                         let hlink_record: Vdfs4CatalogHlinkRecord = file.read_le()?;
                         if verbose{println!("{:?}", hlink_record)};
