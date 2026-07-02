@@ -116,6 +116,38 @@ pub struct Vdfs4GenNodeDescr {
     pub node_type: u32, //Type of bnode node or index (value of enum vdfs4_node_type)
 }
 
+#[derive(Eq, PartialEq, Debug, Clone)]
+pub enum KeyRecordType {
+    VDFS4_CATALOG_RECORD_DUMMY = 0,
+    VDFS4_CATALOG_FOLDER_RECORD = 1,
+    VDFS4_CATALOG_FILE_RECORD = 2,
+    VDFS4_CATALOG_HLINK_RECORD = 3,
+    /* UNUSED:								0x04 */
+    VDFS4_CATALOG_ILINK_RECORD=5, 
+    VDFS4_CATALOG_UNPACK_INODE= 0x10,
+    UNKNOWN = 0xff
+}
+impl KeyRecordType {
+    pub fn from(id: u8) -> Self {
+        match id {
+            0 => KeyRecordType::VDFS4_CATALOG_RECORD_DUMMY,
+            1 => KeyRecordType::VDFS4_CATALOG_FOLDER_RECORD,
+            2 => KeyRecordType::VDFS4_CATALOG_FILE_RECORD,
+            3 => KeyRecordType::VDFS4_CATALOG_HLINK_RECORD,
+            5 => KeyRecordType::VDFS4_CATALOG_ILINK_RECORD,
+            0x10 => KeyRecordType::VDFS4_CATALOG_UNPACK_INODE,
+            _ => KeyRecordType::UNKNOWN
+        }
+    }
+}
+
+pub enum InodeMeta {
+    File(Vdfs4CatalogFileRecord),
+    Folder(Vdfs4CatalogFolderRecord),
+    None
+}
+
+
 #[derive(BinRead, Debug)]
 pub struct Vdfs4BaseTable {
     //vdfs4_snapshot_descriptor

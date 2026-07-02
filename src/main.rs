@@ -1,11 +1,11 @@
 mod include;
 
 use clap::Parser;
-use std::fs::{File};
+use std::{collections::HashMap, fs::File};
 use binrw::{BinReaderExt};
 use std::io::{Seek, SeekFrom};
 
-use include::{read_exact, string_from_bytes, Vdfs4VolumeBegins, Vdfs4SuperBlock, Vdfs4ExtendedSuperBlock, Vdfs4BaseTable, Vdfs4GenNodeDescr, Vdfs4RawBtreeHead, Vdfs4CatTreeKey, Vdfs4CatalogFolderRecord, Vdfs4CatalogFileRecord, Vdfs4CatalogHlinkRecord};
+use include::*;
 
 #[derive(Parser, Debug)]
 struct Args {
@@ -13,6 +13,13 @@ struct Args {
     verbose: bool,
     /// Input file
     input_file: String,
+}
+
+struct MyInode {
+    parent_id: u64,
+    kind: KeyRecordType,
+    name: String,
+    meta: InodeMeta,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -76,15 +83,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let btrees_offset = exsb.btrees_start_block * block_size;
     file.seek(SeekFrom::Start(btrees_offset))?;
 
-    println!();
+    //
+    let mut my_inodes: HashMap<u64, MyInode> = HashMap::new();
+    let mut cat_tree: HashMap<u64, Vec<(String, u64)>> = HashMap::new();
+
+    println!("Loading...\n");
     let mut btree_n = 0;
-    //
-    let mut tfo = 0;
-    let mut tfi = 0;
-    //
     loop {
         let pos = file.stream_position().unwrap();
-        //println!("Pos : {}", pos);
         let btables_block = (pos - btrees_offset)/block_size;
         if btables_block == exsb.btrees_lenght_blocks {
             println!("\nReach end of btrees (block {})", btables_block);
@@ -92,7 +98,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         let magic = read_exact(&mut file, 4)?;
-        //println!("BTREES BLOCK {}: Magic found: {}, Offset: {}", btables_block, string_from_bytes(&magic), pos);
+        println!("BTREES BLOCK {}: Magic found: {}, Offset: {}", btables_block, string_from_bytes(&magic), pos);
         if magic == b"fsmb" {
             println!("BTREES BLOCK {}, Offset: {} - FSMB bitmap (fmsb)", btables_block, pos);
             file.seek(SeekFrom::Current((1 * block_size as i64) - 4))?; //1 block
@@ -102,14 +108,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             file.seek(SeekFrom::Current((1 * block_size as i64) - 4))?; // 1 block
 
         } else if magic == b"eHND" { // btree header
-            file.seek(SeekFrom::Current(-4))?;
+            file.seek(SeekFrom::Current(-4))?;         
+             
             let btree_head: Vdfs4RawBtreeHead = file.read_le()?;
             if verbose{println!("{:?}", btree_head)};
             let btree_type = if btree_n == 0 {"VDFS4_BTREE_CATALOG"} else if btree_n == 1 {"VDFS4_BTREE_EXTENTS"} else if btree_n == 2 {"VDFS4_BTREE_XATTRS"} else {"Unknown"};
 
             println!("\nBtree {} ({}) - Root bnode id: {}, Btree height: {}", 
                     btree_n, btree_type, btree_head.root_bnode_id, btree_head.btree_height);
-
+            
             file.seek(SeekFrom::Current((4 * block_size as i64) - 20 /* sizeof descriptor*/))?; // 4 blocks
             btree_n += 1;
 
@@ -118,33 +125,55 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let node_descr: Vdfs4GenNodeDescr = file.read_le()?;
             if verbose{println!("{:?}", node_descr)};
             println!("- Bnode {} - Type: {}, Record count: {}", 
-                    node_descr.node_id, node_descr.node_type, node_descr.recs_count);
+                   node_descr.node_id, node_descr.node_type, node_descr.recs_count);
 
             if btree_n == 1 { //catalog tree - 1 i know
                 for i in 0..node_descr.recs_count {
                     let key: Vdfs4CatTreeKey = file.read_le()?;
                     if verbose{println!("{:?}", key)}
-                    let key_type = 
-                    if      key.record_type == 0x00 {"VDFS4_CATALOG_RECORD_DUMMY"} 
-                    else if key.record_type == 0x01 {tfo+=1; "VDFS4_CATALOG_FOLDER_RECORD"}
-                    else if key.record_type == 0x02 {tfi+=1; "VDFS4_CATALOG_FILE_RECORD"}
-                    else if key.record_type == 0x03 {"VDFS4_CATALOG_HLINK_RECORD"}
-                    else if key.record_type == 0x05 {"VDFS4_CATALOG_ILINK_RECORD"}
-                    else if key.record_type == 0x10 {"VDFS4_CATALOG_UNPACK_INODE"}
-                    else {"Unknown"};
-                    println!("-- KEY {} - Object ID: {}, Parent ID: {}, Type: {}({}), Name: {}", i, key.object_id, key.parent_id, key.record_type, key_type, key.name_str());
+                    let key_type = KeyRecordType::from(key.record_type);
+                    println!("-- KEY {} - Object ID: {}, Parent ID: {}, Type: {}({:?}), Name: {}", i, key.object_id, key.parent_id, key.record_type, key_type, key.name_str());
+
+                    if key_type == KeyRecordType::VDFS4_CATALOG_ILINK_RECORD {
+                        /* cattree.c -- parent_id stored as object_id and vice versa !!!*/
+                        let new_child = (key.name_str(), key.parent_id);
+                        let children = cat_tree.entry(key.object_id).or_default();
+    
+                        //prevent duplicate entries
+                        if !children.contains(&new_child) {
+                            children.push(new_child);
+                        }
+
+                    } else if key_type == KeyRecordType::VDFS4_CATALOG_HLINK_RECORD {
+                        //insert hlink into children (???)
+                        let new_child = (key.name_str(), key.object_id);
+                        let children = cat_tree.entry(key.parent_id).or_default();
+
+                        //prevent duplicate entries
+                        if !children.contains(&new_child) {
+                            children.push(new_child);
+                        }
+                        
+                    } else {
+                        //ran in seperate
+                    }
 
                     if node_descr.node_type == 1 { //special type for root inode?
                         let _ = read_exact(&mut file, 4); // it has a number only idk what for
 
-                    } else if key_type == "VDFS4_CATALOG_FOLDER_RECORD" {
+                    } else if key_type == KeyRecordType::VDFS4_CATALOG_FOLDER_RECORD {
                         let folder_record: Vdfs4CatalogFolderRecord = file.read_le()?;
+                        
                         if verbose{println!("{:?}", folder_record)};
                         println!("--- Flags: {}, Total items count: {}, Links count: {}, File mode: {}, User id: {}, Group id: {}, Creation time: {}",
                                 folder_record.flags, folder_record.total_items_count, folder_record.links_count, folder_record.file_mode, folder_record.user_id, folder_record.group_id, folder_record.creation_time.seconds);
+                        
 
-                    } else if key_type == "VDFS4_CATALOG_FILE_RECORD" {
+                        my_inodes.insert(key.object_id, MyInode { parent_id: key.parent_id, kind: key_type.clone(), name: key.name_str(), meta: InodeMeta::Folder(folder_record)});
+
+                    } else if key_type == KeyRecordType::VDFS4_CATALOG_FILE_RECORD {
                         let file_record: Vdfs4CatalogFileRecord = file.read_le()?;
+                        
                         if verbose{println!("{:?}", file_record)};
                         println!("--- Flags: {}, Total items count: {}, Links count: {}, File mode: {}, User id: {}, Group id: {}, Creation time: {}",
                                 file_record.common.flags, file_record.common.total_items_count, file_record.common.links_count, file_record.common.file_mode, file_record.common.user_id, file_record.common.group_id, file_record.common.creation_time.seconds);
@@ -153,22 +182,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if (file_record.common.flags & (1 << 19 /*VDFS4_INLINE_DATA_FILE*/)) != 0 { //INLINE FILE
                             println!("--- [INLINE FILE]");
                         } else {
-                            for extent in file_record.data_fork.extents {
+                            for extent in &file_record.data_fork.extents {
                                 if extent.lenght == 0 {break};
                                 println!("--- [EXTENT] Begin: {} ({}), Lenght: {}, iBlock: {}", extent.begin, extent.begin * block_size, extent.lenght, extent.iblock);
                             }
                         }
-                    } else if key_type == "VDFS4_CATALOG_HLINK_RECORD" {
+                        
+                        my_inodes.insert(key.object_id, MyInode { parent_id: key.parent_id, kind: key_type.clone(), name: key.name_str(), meta: InodeMeta::File(file_record)});
+
+                    } else if key_type == KeyRecordType::VDFS4_CATALOG_HLINK_RECORD {
                         let hlink_record: Vdfs4CatalogHlinkRecord = file.read_le()?;
                         if verbose{println!("{:?}", hlink_record)};
-
                     }
+
                     //ilink record does not store any extra data.
                     
                 }
                 let new_pos = file.stream_position().unwrap();
                 let diff_pos = new_pos as i64 - pos as i64;
-                //println!("-- READ {}", diff_pos);
 
                 file.seek(SeekFrom::Current((4 * block_size as i64) /* sizeof descriptor*/ - diff_pos/* read data*/ ))?; // 4 blocks
 
@@ -181,15 +212,64 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             break
 
         } else {
-            //println!("- Found nothing! Skip 1 block");
+            println!("- Found nothing! Skip 1 block");
             file.seek(SeekFrom::Current((1 * block_size as i64) - 4))?; // 1 block
         }
     }
 
-    println!("{} {}", tfo, tfi);
 
+    /*
+    println!("\n\nMY INO");
+    for (id, inode) in &my_inodes {
+        println!("{}. parent: {}, kind: {:?}, name: {}", id, inode.parent_id, inode.kind, inode.name);
     
+        if !my_inodes.contains_key(&inode.parent_id) {
+            println!("- ORPHAN NODE");
+        }
+    }
+
+    println!("\n\nCTREE");
+    for (id, entries) in &cat_tree {
+        println!("id: {} - {:?}", id, entries);
+    }
+    */
+
+    //run on root dir id 1
+    run_dir(1, &cat_tree, &my_inodes, "/");
 
 
     Ok(())
+}
+
+fn run_dir(id: u64, cat_tree: &HashMap<u64, Vec<(String, u64)>>, my_inodes: &HashMap<u64, MyInode>, path: &str) {
+
+    //process children
+    if let Some(children) = cat_tree.get(&id) {
+        for (child_name, child_id) in children {
+            let inode = my_inodes.get(child_id).expect("inode not found");
+
+            let new_path = if path == "/" {
+                format!("/{}", child_name)
+            } else {
+                format!("{}/{}", path, child_name)
+            };
+            
+            //println!("{} [{:?}]", new_path, inode.kind);
+            println!("{}", new_path);
+
+            match inode.kind {
+                KeyRecordType::VDFS4_CATALOG_FOLDER_RECORD => run_dir(*child_id, cat_tree, my_inodes, &new_path),
+                KeyRecordType::VDFS4_CATALOG_FILE_RECORD => read_file(inode),
+                _ => println!("unexpected inode kind {:?}", inode.kind)
+            }
+            
+        }
+    }
+}
+
+fn read_file(inode: &MyInode) {
+    let file_record = match &inode.meta {
+        InodeMeta::File(record) => record,
+        _ => panic!("no file record in inode provided to read_file")
+    };
 }
