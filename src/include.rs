@@ -1,3 +1,5 @@
+#![allow(dead_code, non_camel_case_types)]
+
 use binrw::{BinRead, BinReaderExt};
 use std::io::{self, Read, Cursor};
 
@@ -15,26 +17,26 @@ pub fn string_from_bytes(buf: &[u8]) -> String {
 // 0x0 offset
 #[derive(BinRead, PartialEq, Eq, Debug)]
 pub struct Vdfs4VolumeBegins {
-    #[br(count = 4)] pub signature: Vec<u8>, //VDFS
-    #[br(count = 4)] pub layout_version: Vec<u8>, //2006, 2007
-    #[br(count = 456)] pub command_line: Vec<u8>, //command line arguments used to create the image
-    #[br(count = 16)] pub creation_time: Vec<u8>,
-    #[br(count = 16)] pub creator_username: Vec<u8>,
-    #[br(count = 12)] _reserved: Vec<u8>,
+    pub signature: [u8; 4], //VDFS
+    pub layout_version: [u8; 4], //2006, 2007
+    pub command_line: [u8; 456], //command line arguments used to create the image
+    pub creation_time: [u8; 16],
+    pub creator_username: [u8; 16],
+    _reserved: [u8; 12],
     pub checksum: u32,
 }
 
 // at 0x200 offset and a 2nd copy at 0x400 offset
 #[derive(BinRead, PartialEq, Eq, Debug)]
 pub struct Vdfs4SuperBlock {
-    #[br(count = 4)] pub signature: Vec<u8>, //VDFS
-    #[br(count = 4)] pub layout_version: Vec<u8>, //2006, 2007
+    pub signature: [u8; 4], //VDFS
+    pub layout_version: [u8; 4], //2006, 2007
     pub maximum_blocks_count: u64,
-    #[br(count = 12)] _creation_timestamp: Vec<u8>, //dontcare
-    #[br(count = 16)] _volume_uuid: Vec<u8>,        //dontcare
-    #[br(count = 16)] pub volume_name: Vec<u8>,
-    #[br(count = 64)] _mkfs_version: Vec<u8>,        //dontcare " The mkfs tool version used to generate Volume"
-    #[br(count = 40)] _unused: Vec<u8>,
+    _creation_timestamp: [u8; 12], //dontcare
+    _volume_uuid: [u8; 16],        //dontcare
+    pub volume_name: [u8; 16],
+    _mkfs_version: [u8; 64],        //dontcare " The mkfs tool version used to generate Volume"
+    _unused: [u8; 40],
     pub log_block_size: u8,     // log2 of block size in bytes
     pub log_super_page_size: u8, // Metadata bnode size and alignment
     pub log_erase_block_size: u8, //Discard request granularity (??? whatever that means )
@@ -45,13 +47,13 @@ pub struct Vdfs4SuperBlock {
     _hash_type: u8, //see above
     _encryption_flags: u8,
     _sign_type: u8,
-    #[br(count = 54)] _reserved: Vec<u8>,
+    _reserved: [u8; 54],
     _exsb_checksum: u32,
     _basetable_checksum: u32,
     _meta_hashtable_checksum: u32,
     pub image_inode_count: u64,
     _pad: u32,
-    #[br(count = 256)] _sb_hash: Vec<u8>, //RSA enctypted hash code of superblock
+    _sb_hash:[u8; 256], //RSA enctypted hash code of superblock
     pub checksum: u32,
 }
 
@@ -78,23 +80,23 @@ pub struct Vdfs4ExtendedSuperBlock {
     //btrees extents
     pub btrees_start_block: u64,
     pub btrees_lenght_blocks: u64, 
-    #[br(count = 1520)] _un: Vec<u8>,//supposed to be 96 btrees exctensts but its always 1 so dikdidk
-    #[br(count = 16)] _extension: Vec<u8>,
+    _un: [u8; 1520],//supposed to be 96 btrees exctensts but its always 1 so dikdidk
+    _extension: [u8; 16],
     pub volume_blocks_count: u64,
     _crc: u8,
-    #[br(count = 16)] _volume_uuid: Vec<u8>,
-    #[br(count = 7)] _reserved: Vec<u8>,
+    _volume_uuid: [u8; 16],
+    _reserved: [u8; 7],
     pub kbytes_written: u64,
     //meta hash table extent
     pub meta_hashtable_start_block: u64,
     pub meta_hashtable_lenght_blocks: u64,
-    #[br(count = 860)] __reserved: Vec<u8>,
+    _reserved2: [u8; 860],
     pub checksum: u32,
 }
 
 #[derive(BinRead, Debug)]
 pub struct Vdfs4RawBtreeHead {
-    #[br(count = 4)] _magic: Vec<u8>, //eHND
+    _magic: [u8; 4], //eHND
     _version1: u32,
     _version2: u32,
     pub root_bnode_id: u32,
@@ -105,7 +107,7 @@ pub struct Vdfs4RawBtreeHead {
 
 #[derive(BinRead, Debug)]
 pub struct Vdfs4GenNodeDescr {
-    #[br(count = 4)] _magic: Vec<u8>, //4E 64 00 00 //Nd
+    _magic: [u8; 4], //4E 64 00 00 //Nd
     _version1: u32,
     _version2: u32,
     _free_space: u16,  //Free space left in bnode
@@ -151,7 +153,7 @@ pub enum InodeMeta {
 #[derive(BinRead, Debug)]
 pub struct Vdfs4BaseTable {
     //vdfs4_snapshot_descriptor
-    #[br(count = 4)] pub magic: Vec<u8>, //CoWB
+    pub magic: [u8; 4], //CoWB
     pub sync_count: u32,
     pub mount_count: u64,
     pub checksum_offset: u64,
@@ -164,7 +166,7 @@ pub struct Vdfs4BaseTable {
 #[derive(BinRead, Debug)]
 pub struct Vdfs4CatTreeKey {
     // vdfs4_generic_key
-    #[br(count = 4)] _magic: Vec<u8>, //00 00 00 00?
+    _magic: [u8; 4], //00 00 00 00?
     pub key_len: u16,                    //Length of tree-specific key
     pub record_len: u16,                 //Full length of record containing the key
     //
@@ -204,9 +206,7 @@ static VDFS4_EXTENTS_COUNT_IN_FORK: usize = 9;
 pub struct Vdfs4Fork {
     pub size_in_bytes: u64,
     pub total_blocks_count: u64,
-
-    #[br(count = 216)] //VDFS4_EXTENTS_COUNT_IN_FORK * 24(size of Vdfs4iExtent)
-    raw: Vec<u8>,
+    raw: [u8; 216], //VDFS4_EXTENTS_COUNT_IN_FORK * 24(size of Vdfs4iExtent)
 }
 impl Vdfs4Fork {    //in original there is  union
     pub fn inline_data(&self) -> &[u8] {
