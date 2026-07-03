@@ -255,6 +255,7 @@ pub struct Vdfs4CatalogHlinkRecord {
 }
 
 //inode flags
+pub const HARD_LINK: u32 = 1 << 10;
 pub const VDFS4_COMPRESSED_FILE: u32 = 1 << 13;
 pub const VDFS4_INLINE_DATA_FILE: u32 = 1 << 19;
 pub const VDFS4_COMP_INLINE_DATA_FILE: u32 = 1 << 20;

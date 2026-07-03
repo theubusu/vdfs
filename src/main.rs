@@ -4,6 +4,7 @@ use clap::Parser;
 use std::{collections::HashMap, fs::{self, File, OpenOptions}, io::{self, Cursor, Read, Write}, path::{Path, PathBuf}};
 use binrw::{BinReaderExt};
 use std::io::{Seek, SeekFrom};
+use tar::{Builder, EntryType, Header};
 
 use include::*;
 use flate2::read::ZlibDecoder;
@@ -241,37 +242,58 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     */
 
+    //making TAR
+    let out_tarfile = File::create(&output_directory_path).unwrap();
+    let mut tar = Builder::new(out_tarfile);
+
     //run on root dir id 1
-    run_dir(1, &cat_tree, &my_inodes, "/", &mut file, &output_directory_path)?;
+    run_dir(1, &cat_tree, &my_inodes, "", &mut file, &mut tar)?;
+
+    tar.finish()?;
 
 
     Ok(())
 }
 
-fn run_dir(id: u64, cat_tree: &HashMap<u64, Vec<(String, u64)>>, my_inodes: &HashMap<u64, MyInode>, path: &str, file: &mut File, out_dir: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+fn run_dir(id: u64, cat_tree: &HashMap<u64, Vec<(String, u64)>>, my_inodes: &HashMap<u64, MyInode>, path: &str, file: &mut File, tarfile: &mut Builder<File>) -> Result<(), Box<dyn std::error::Error>> {
 
-    //create dir
-    let dir_path = Path::new(&out_dir).join(path.trim_start_matches('/'));
-    fs::create_dir_all(&out_dir)?;
-    fs::create_dir_all(&dir_path)?;
+    let inode = &my_inodes[&id];
+    let folder_record = match &inode.meta {
+        InodeMeta::Folder(record) => record,
+        _ => panic!("no file record in inode provided to read_file")
+    };
+    if !path.is_empty() {
+        let mut header = Header::new_gnu();
+        header.set_gid(folder_record.group_id as u64);
+        header.set_uid(folder_record.user_id as u64);
+        header.set_mode(folder_record.file_mode as u32);
+
+        //mtime
+        let mtime_secs = ((folder_record.modification_time.seconds_high as u64) << 32)| (folder_record.modification_time.seconds as u64);
+        header.set_mtime(mtime_secs);
+
+        header.set_entry_type(EntryType::Directory);
+        header.set_size(0);
+        tarfile.append_data(&mut header, path, std::io::empty())?;
+    }
 
     //process children
     if let Some(children) = cat_tree.get(&id) {
         for (child_name, child_id) in children {
             let inode = my_inodes.get(child_id).expect("inode not found");
 
-            let new_path = if path == "/" {
-                format!("/{}", child_name)
+            let new_path = if path.is_empty() {
+                child_name.clone()
             } else {
                 format!("{}/{}", path, child_name)
             };
-            
+
             //println!("{} [{:?}]", new_path, inode.kind);
             println!("{}", new_path);
 
             match inode.kind {
-                KeyRecordType::VDFS4_CATALOG_FOLDER_RECORD => run_dir(*child_id, cat_tree, my_inodes, &new_path, file, out_dir)?,
-                KeyRecordType::VDFS4_CATALOG_FILE_RECORD => read_file(inode, &new_path, file, out_dir)?,
+                KeyRecordType::VDFS4_CATALOG_FOLDER_RECORD => run_dir(*child_id, cat_tree, my_inodes, &new_path, file, tarfile)?,
+                KeyRecordType::VDFS4_CATALOG_FILE_RECORD => read_file(inode, &new_path, file, tarfile)?,
                 _ => return Err(format!("unexpected inode kind {:?}", inode.kind).into())
             }
             
@@ -280,24 +302,24 @@ fn run_dir(id: u64, cat_tree: &HashMap<u64, Vec<(String, u64)>>, my_inodes: &Has
     Ok(())
 }
 
-fn read_file(inode: &MyInode, path: &str, file: &mut File, out_dir: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+fn read_file(inode: &MyInode, path: &str, file: &mut File, tarfile: &mut Builder<File>) -> Result<(), Box<dyn std::error::Error>> {
     let file_record = match &inode.meta {
         InodeMeta::File(record) => record,
         _ => panic!("no file record in inode provided to read_file")
     };
-    println!("- Flags: {}, Total items count: {}, Links count: {}, File mode: {}, User id: {}, Group id: {}, Creation time: {}",
-            file_record.common.flags, file_record.common.total_items_count, file_record.common.links_count, file_record.common.file_mode, file_record.common.user_id, file_record.common.group_id, file_record.common.creation_time.seconds);
-    println!("- Size in bytes: {}, Total blocks count: {}", file_record.data_fork.size_in_bytes, file_record.data_fork.total_blocks_count);
+    //println!("- Flags: {}, Total items count: {}, Links count: {}, File mode: {}, User id: {}, Group id: {}, Creation time: {}",
+    //        file_record.common.flags, file_record.common.total_items_count, file_record.common.links_count, file_record.common.file_mode, file_record.common.user_id, file_record.common.group_id, file_record.common.creation_time.seconds);
+    //println!("- Size in bytes: {}, Total blocks count: {}", file_record.data_fork.size_in_bytes, file_record.data_fork.total_blocks_count);
 
     let mut data: Vec<u8> = Vec::new();
-
+    
     if (file_record.common.flags & VDFS4_INLINE_DATA_FILE) != 0 {
-        println!("- [INLINE FILE]");
+        //println!("- [INLINE FILE]");
         data = file_record.data_fork.inline_data().to_vec();
     } else {
         for extent in &file_record.data_fork.extents()? {
             if extent.lenght == 0 {break};
-            println!("-- [EXTENT] Begin: {}, Lenght: {}, iBlock: {}", extent.begin, extent.lenght, extent.iblock);
+            //println!("-- [EXTENT] Begin: {}, Lenght: {}, iBlock: {}", extent.begin, extent.lenght, extent.iblock);
 
             let offset = extent.begin * 4096;
             let size = extent.lenght * 4096;
@@ -311,17 +333,33 @@ fn read_file(inode: &MyInode, path: &str, file: &mut File, out_dir: &PathBuf) ->
     }
 
     if (file_record.common.flags & VDFS4_COMPRESSED_FILE) != 0 {
-        println!("- [COMPRESSED FILE]");
+        //println!("- [COMPRESSED FILE]");
         data = decompress_data(&data)?;
     }
 
-    let output_path = Path::new(&out_dir).join(path.trim_start_matches('/'));
-    fs::create_dir_all(&out_dir)?;
-    if let Some(parent) = output_path.parent() {
-        fs::create_dir_all(parent)?;
+    //create file
+    let mut header = Header::new_gnu();
+
+    header.set_gid(file_record.common.group_id as u64);
+    header.set_uid(file_record.common.user_id as u64);
+    header.set_mode(file_record.common.file_mode as u32);
+
+    //mtime
+    let mtime_secs = ((file_record.common.modification_time.seconds_high as u64) << 32)| (file_record.common.modification_time.seconds as u64);
+    header.set_mtime(mtime_secs);
+    
+    if file_record.common.file_mode & 0o170000 == 0o120000 {    //SYMLINK
+        //println!(" - [SYMLINK]");
+        header.set_entry_type(EntryType::Symlink);
+		header.set_size(0);
+        let dest = String::from_utf8(data)?;
+        tarfile.append_link(&mut header, path, &dest)?;
+
+    } else {
+        header.set_entry_type(EntryType::Regular);
+        header.set_size(data.len() as u64);
+        tarfile.append_data(&mut header, path, data.as_slice())?;
     }
-    let mut out_file = OpenOptions::new().write(true).create(true).open(output_path)?;
-    out_file.write_all(&data)?;
 
     Ok(())
     
@@ -333,8 +371,8 @@ fn decompress_data(data: &[u8]) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     //seek to start of desc cmpr
     data_reader.seek(SeekFrom::End(-40))?;
     let descr: Vdfs4CompFileDescr = data_reader.read_le()?;
-    println!("comp_descr - magic={:?}, extents_num={}, layout_version={}, unpacked_size={}, log_chunk_size={}"
-            , descr.magic, descr.extents_num, descr.layout_version, descr.unpacked_size, descr.log_chunk_size);
+    //println!("comp_descr - magic={:?}, extents_num={}, layout_version={}, unpacked_size={}, log_chunk_size={}"
+    //        , descr.magic, descr.extents_num, descr.layout_version, descr.unpacked_size, descr.log_chunk_size);
 
     //For magic
     //first letter - auth type:
@@ -371,7 +409,7 @@ fn decompress_data(data: &[u8]) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let mut extents: Vec<Vdfs4CompExtent> = Vec::new();
     for i in 0..descr.extents_num {
         let extent: Vdfs4CompExtent = data_reader.read_le()?;
-        println!("extent {} - magic={:?}, flags={}, len_bytes={}, start={}", i+1, extent.magic, extent.flags, extent.len_bytes, extent.start);
+        //println!("extent {} - magic={:?}, flags={}, len_bytes={}, start={}", i+1, extent.magic, extent.flags, extent.len_bytes, extent.start);
         if &extent.magic != b"XT" {
             return Err("invalid exten magic".into());
         }
