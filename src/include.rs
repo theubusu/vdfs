@@ -239,3 +239,33 @@ pub struct Vdfs4CatalogHlinkRecord {
     _pad1: u16,
     _pad2: u32,
 }
+
+//inode flags
+pub const VDFS4_COMPRESSED_FILE: u32 = 1 << 13;
+pub const VDFS4_INLINE_DATA_FILE: u32 = 1 << 19;
+pub const VDFS4_COMP_INLINE_DATA_FILE: u32 = 1 << 20;
+
+
+pub const VDFS4_AES_NONCE_SIZE: usize = 8;
+
+//com
+#[derive(BinRead, Debug)]
+pub struct Vdfs4CompFileDescr {
+    _reserved: [u8; 7],
+    _sign_type: u8,
+    pub magic: [u8; 4],
+    pub extents_num: u16,
+    pub layout_version: u16,
+    pub unpacked_size: u64,
+    _crc: u32,
+    pub log_chunk_size: u32,
+    _aes_nonce: [u8; VDFS4_AES_NONCE_SIZE],
+}
+
+#[derive(BinRead, Debug)]
+pub struct Vdfs4CompExtent {
+    pub magic: [u8; 2],
+    pub flags: u16,
+    pub len_bytes: u32,
+    pub start: u64,
+}

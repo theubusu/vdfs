@@ -1,11 +1,12 @@
 mod include;
 
 use clap::Parser;
-use std::{collections::HashMap, fs::File};
+use std::{collections::HashMap, fs::{self, File, OpenOptions}, io::{self, Cursor, Read, Write}, path::{Path, PathBuf}};
 use binrw::{BinReaderExt};
 use std::io::{Seek, SeekFrom};
 
 use include::*;
+use flate2::read::ZlibDecoder;
 
 #[derive(Parser, Debug)]
 struct Args {
@@ -13,6 +14,8 @@ struct Args {
     verbose: bool,
     /// Input file
     input_file: String,
+
+    out_dir: String,
 }
 
 struct MyInode {
@@ -28,6 +31,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let file_path = args.input_file;
     println!("Input file: {}", file_path);
     let mut file = File::open(file_path)?;
+    let output_directory_path = PathBuf::from(&args.out_dir);
 
     // volume begins block
     let vb: Vdfs4VolumeBegins = file.read_le()?;
@@ -93,29 +97,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let pos = file.stream_position().unwrap();
         let btables_block = (pos - btrees_offset)/block_size;
         if btables_block == exsb.btrees_lenght_blocks {
-            println!("\nReach end of btrees (block {})", btables_block);
+            //println!("\nReach end of btrees (block {})", btables_block);
             break
         }
 
         let magic = read_exact(&mut file, 4)?;
-        println!("BTREES BLOCK {}: Magic found: {}, Offset: {}", btables_block, string_from_bytes(&magic), pos);
+        //println!("BTREES BLOCK {}: Magic found: {}, Offset: {}", btables_block, string_from_bytes(&magic), pos);
         if magic == b"fsmb" {
-            println!("BTREES BLOCK {}, Offset: {} - FSMB bitmap (fmsb)", btables_block, pos);
+            //println!("BTREES BLOCK {}, Offset: {} - FSMB bitmap (fmsb)", btables_block, pos);
             file.seek(SeekFrom::Current((1 * block_size as i64) - 4))?; //1 block
 
         } else if magic == b"inob" {
-            println!("BTREES BLOCK {}, Offset: {} - Inode bitmap (inob)", btables_block, pos);
+            //println!("BTREES BLOCK {}, Offset: {} - Inode bitmap (inob)", btables_block, pos);
             file.seek(SeekFrom::Current((1 * block_size as i64) - 4))?; // 1 block
 
         } else if magic == b"eHND" { // btree header
-            file.seek(SeekFrom::Current(-4))?;         
-             
-            let btree_head: Vdfs4RawBtreeHead = file.read_le()?;
+            file.seek(SeekFrom::Current(-4))?;                
+            let _btree_head: Vdfs4RawBtreeHead = file.read_le()?;
+            /*
             if verbose{println!("{:?}", btree_head)};
             let btree_type = if btree_n == 0 {"VDFS4_BTREE_CATALOG"} else if btree_n == 1 {"VDFS4_BTREE_EXTENTS"} else if btree_n == 2 {"VDFS4_BTREE_XATTRS"} else {"Unknown"};
 
             println!("\nBtree {} ({}) - Root bnode id: {}, Btree height: {}", 
                     btree_n, btree_type, btree_head.root_bnode_id, btree_head.btree_height);
+            */
             
             file.seek(SeekFrom::Current((4 * block_size as i64) - 20 /* sizeof descriptor*/))?; // 4 blocks
             btree_n += 1;
@@ -123,16 +128,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         } else if magic == b"Nd\x00\x00" { //NODE
             file.seek(SeekFrom::Current(-4))?;
             let node_descr: Vdfs4GenNodeDescr = file.read_le()?;
-            if verbose{println!("{:?}", node_descr)};
-            println!("- Bnode {} - Type: {}, Record count: {}", 
-                   node_descr.node_id, node_descr.node_type, node_descr.recs_count);
+            //if verbose{println!("{:?}", node_descr)};
+            //println!("- Bnode {} - Type: {}, Record count: {}", 
+            //       node_descr.node_id, node_descr.node_type, node_descr.recs_count);
 
             if btree_n == 1 { //catalog tree - 1 i know
-                for i in 0..node_descr.recs_count {
+                for _i in 0..node_descr.recs_count {
                     let key: Vdfs4CatTreeKey = file.read_le()?;
                     if verbose{println!("{:?}", key)}
                     let key_type = KeyRecordType::from(key.record_type);
-                    println!("-- KEY {} - Object ID: {}, Parent ID: {}, Type: {}({:?}), Name: {}", i, key.object_id, key.parent_id, key.record_type, key_type, key.name_str());
+                    //println!("-- KEY {} - Object ID: {}, Parent ID: {}, Type: {}({:?}), Name: {}", i, key.object_id, key.parent_id, key.record_type, key_type, key.name_str());
 
                     if key_type == KeyRecordType::VDFS4_CATALOG_ILINK_RECORD {
                         /* cattree.c -- parent_id stored as object_id and vice versa !!!*/
@@ -163,17 +168,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                     } else if key_type == KeyRecordType::VDFS4_CATALOG_FOLDER_RECORD {
                         let folder_record: Vdfs4CatalogFolderRecord = file.read_le()?;
-                        
+                        /* 
                         if verbose{println!("{:?}", folder_record)};
                         println!("--- Flags: {}, Total items count: {}, Links count: {}, File mode: {}, User id: {}, Group id: {}, Creation time: {}",
                                 folder_record.flags, folder_record.total_items_count, folder_record.links_count, folder_record.file_mode, folder_record.user_id, folder_record.group_id, folder_record.creation_time.seconds);
                         
-
+                        */
                         my_inodes.insert(key.object_id, MyInode { parent_id: key.parent_id, kind: key_type.clone(), name: key.name_str(), meta: InodeMeta::Folder(folder_record)});
 
                     } else if key_type == KeyRecordType::VDFS4_CATALOG_FILE_RECORD {
                         let file_record: Vdfs4CatalogFileRecord = file.read_le()?;
                         
+                        /*
                         if verbose{println!("{:?}", file_record)};
                         println!("--- Flags: {}, Total items count: {}, Links count: {}, File mode: {}, User id: {}, Group id: {}, Creation time: {}",
                                 file_record.common.flags, file_record.common.total_items_count, file_record.common.links_count, file_record.common.file_mode, file_record.common.user_id, file_record.common.group_id, file_record.common.creation_time.seconds);
@@ -187,6 +193,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 println!("--- [EXTENT] Begin: {} ({}), Lenght: {}, iBlock: {}", extent.begin, extent.begin * block_size, extent.lenght, extent.iblock);
                             }
                         }
+                         */
                         
                         my_inodes.insert(key.object_id, MyInode { parent_id: key.parent_id, kind: key_type.clone(), name: key.name_str(), meta: InodeMeta::File(file_record)});
 
@@ -208,11 +215,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
         } else if magic == b"\xED\xAC\xEF\x0D" {
-            println!("\nBTREES BLOCK {}, Offset: {} - Premature end of btrees blocks??", btables_block, pos);
+            //println!("\nBTREES BLOCK {}, Offset: {} - Premature end of btrees blocks??", btables_block, pos);
             break
 
         } else {
-            println!("- Found nothing! Skip 1 block");
+            //println!("- Found nothing! Skip 1 block");
             file.seek(SeekFrom::Current((1 * block_size as i64) - 4))?; // 1 block
         }
     }
@@ -235,13 +242,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     */
 
     //run on root dir id 1
-    run_dir(1, &cat_tree, &my_inodes, "/");
+    run_dir(1, &cat_tree, &my_inodes, "/", &mut file, &output_directory_path)?;
 
 
     Ok(())
 }
 
-fn run_dir(id: u64, cat_tree: &HashMap<u64, Vec<(String, u64)>>, my_inodes: &HashMap<u64, MyInode>, path: &str) {
+fn run_dir(id: u64, cat_tree: &HashMap<u64, Vec<(String, u64)>>, my_inodes: &HashMap<u64, MyInode>, path: &str, file: &mut File, out_dir: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+
+    //create dir
+    let dir_path = Path::new(&out_dir).join(path.trim_start_matches('/'));
+    fs::create_dir_all(&out_dir)?;
+    fs::create_dir_all(&dir_path)?;
 
     //process children
     if let Some(children) = cat_tree.get(&id) {
@@ -258,18 +270,112 @@ fn run_dir(id: u64, cat_tree: &HashMap<u64, Vec<(String, u64)>>, my_inodes: &Has
             println!("{}", new_path);
 
             match inode.kind {
-                KeyRecordType::VDFS4_CATALOG_FOLDER_RECORD => run_dir(*child_id, cat_tree, my_inodes, &new_path),
-                KeyRecordType::VDFS4_CATALOG_FILE_RECORD => read_file(inode),
-                _ => println!("unexpected inode kind {:?}", inode.kind)
+                KeyRecordType::VDFS4_CATALOG_FOLDER_RECORD => run_dir(*child_id, cat_tree, my_inodes, &new_path, file, out_dir)?,
+                KeyRecordType::VDFS4_CATALOG_FILE_RECORD => read_file(inode, &new_path, file, out_dir)?,
+                _ => return Err(format!("unexpected inode kind {:?}", inode.kind).into())
             }
             
         }
     }
+    Ok(())
 }
 
-fn read_file(inode: &MyInode) {
+fn read_file(inode: &MyInode, path: &str, file: &mut File, out_dir: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     let file_record = match &inode.meta {
         InodeMeta::File(record) => record,
         _ => panic!("no file record in inode provided to read_file")
     };
+    println!("- Flags: {}, Total items count: {}, Links count: {}, File mode: {}, User id: {}, Group id: {}, Creation time: {}",
+            file_record.common.flags, file_record.common.total_items_count, file_record.common.links_count, file_record.common.file_mode, file_record.common.user_id, file_record.common.group_id, file_record.common.creation_time.seconds);
+    println!("- Size in bytes: {}, Total blocks count: {}", file_record.data_fork.size_in_bytes, file_record.data_fork.total_blocks_count);
+
+    let mut data: Vec<u8> = Vec::new();
+
+    if (file_record.common.flags & VDFS4_INLINE_DATA_FILE) != 0 { //how to handle?
+        println!("- [INLINE FILE]");
+    }
+
+    for extent in &file_record.data_fork.extents {
+        if extent.lenght == 0 {break};
+        println!("-- [EXTENT] Begin: {}, Lenght: {}, iBlock: {}", extent.begin, extent.lenght, extent.iblock);
+
+        let offset = extent.begin * 4096;
+        let size = extent.lenght * 4096;
+
+        file.seek(SeekFrom::Start(offset))?;
+        let mut buf = vec![0u8; size as usize];
+        file.read_exact(&mut buf)?;
+        data.extend_from_slice(&buf);
+    }
+    data.truncate(file_record.data_fork.size_in_bytes as usize);
+
+    if (file_record.common.flags & VDFS4_COMPRESSED_FILE) != 0 {
+        println!("- [COMPRESSED FILE]");
+        data = decompress_data(&data)?;
+    }
+
+    let output_path = Path::new(&out_dir).join(path.trim_start_matches('/'));
+    fs::create_dir_all(&out_dir)?;
+    if let Some(parent) = output_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut out_file = OpenOptions::new().write(true).create(true).open(output_path)?;
+    out_file.write_all(&data)?;
+
+    Ok(())
+    
+}
+
+fn decompress_data(data: &[u8]) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let mut data_reader = Cursor::new(data);
+
+    //seek to start of desc cmpr
+    data_reader.seek(SeekFrom::End(-40))?;
+    let descr: Vdfs4CompFileDescr = data_reader.read_le()?;
+    println!("comp_descr - magic={:?}, extents_num={}, layout_version={}, unpacked_size={}, log_chunk_size={}"
+            , descr.magic, descr.extents_num, descr.layout_version, descr.unpacked_size, descr.log_chunk_size);
+
+    //For magic
+    //First letter is always C
+    //Zip - zlib
+    //Gzp - gzip
+    //Lzo - lzo
+    //Zst - zstd
+    if &descr.magic != b"CZip" {
+        return Err("only zlib supported".into());
+    }
+
+    //seek to start of extents
+    data_reader.seek(SeekFrom::End(-40 - (descr.extents_num as i64 * 16)))?;
+    let mut extents: Vec<Vdfs4CompExtent> = Vec::new();
+    for i in 0..descr.extents_num {
+        let extent: Vdfs4CompExtent = data_reader.read_le()?;
+        println!("extent {} - magic={:?}, flags={}, len_bytes={}, start={}", i+1, extent.magic, extent.flags, extent.len_bytes, extent.start);
+        if &extent.magic != b"XT" {
+            return Err("invalid exten magic".into());
+        }
+        extents.push(extent);
+    }
+
+    let mut out_data: Vec<u8> = Vec::new();
+    for extent in extents {
+        data_reader.seek(SeekFrom::Start(extent.start))?;
+        let mut buf = vec![0u8; extent.len_bytes as usize];
+        data_reader.read_exact(&mut buf)?;
+
+        if extent.flags == 0 {  //compressed
+            buf = decompress_zlib(&buf)?;
+        }
+        out_data.extend_from_slice(&buf);
+    }
+
+    Ok(out_data)
+}
+
+pub fn decompress_zlib(data: &[u8]) -> io::Result<Vec<u8>> {
+    let mut decoder = ZlibDecoder::new(data);
+    let mut decompressed = Vec::new();
+    decoder.read_to_end(&mut decompressed)?;
+
+    Ok(decompressed)
 }
