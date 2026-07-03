@@ -1,5 +1,5 @@
-use binrw::{BinRead};
-use std::io::{self, Read};
+use binrw::{BinRead, BinReaderExt};
+use std::io::{self, Read, Cursor};
 
 pub fn read_exact<R: Read>(reader: &mut R, size: usize) -> io::Result<Vec<u8>> {
     let mut buf = vec![0u8; size];
@@ -205,7 +205,21 @@ pub struct Vdfs4Fork {
     pub size_in_bytes: u64,
     pub total_blocks_count: u64,
 
-    pub extents: [Vdfs4iExtent; VDFS4_EXTENTS_COUNT_IN_FORK],
+    #[br(count = 216)] //VDFS4_EXTENTS_COUNT_IN_FORK * 24(size of Vdfs4iExtent)
+    raw: Vec<u8>,
+}
+impl Vdfs4Fork {    //in original there is  union
+    pub fn inline_data(&self) -> &[u8] {
+        &self.raw[..self.size_in_bytes as usize]
+    }
+    pub fn extents(&self) -> Result<Vec<Vdfs4iExtent>, binrw::Error> {
+        let mut c = Cursor::new(&self.raw);
+        let mut extents = Vec::with_capacity(9);
+        for _ in 0..9 {
+            extents.push(c.read_le()?);
+        }
+        Ok(extents)
+    }
 }
 
 //On-disk structure to hold file and folder records.
@@ -252,7 +266,7 @@ pub const VDFS4_AES_NONCE_SIZE: usize = 8;
 #[derive(BinRead, Debug)]
 pub struct Vdfs4CompFileDescr {
     _reserved: [u8; 7],
-    _sign_type: u8,
+    pub sign_type: u8,
     pub magic: [u8; 4],
     pub extents_num: u16,
     pub layout_version: u16,

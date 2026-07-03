@@ -291,23 +291,24 @@ fn read_file(inode: &MyInode, path: &str, file: &mut File, out_dir: &PathBuf) ->
 
     let mut data: Vec<u8> = Vec::new();
 
-    if (file_record.common.flags & VDFS4_INLINE_DATA_FILE) != 0 { //how to handle?
+    if (file_record.common.flags & VDFS4_INLINE_DATA_FILE) != 0 {
         println!("- [INLINE FILE]");
+        data = file_record.data_fork.inline_data().to_vec();
+    } else {
+        for extent in &file_record.data_fork.extents()? {
+            if extent.lenght == 0 {break};
+            println!("-- [EXTENT] Begin: {}, Lenght: {}, iBlock: {}", extent.begin, extent.lenght, extent.iblock);
+
+            let offset = extent.begin * 4096;
+            let size = extent.lenght * 4096;
+
+            file.seek(SeekFrom::Start(offset))?;
+            let mut buf = vec![0u8; size as usize];
+            file.read_exact(&mut buf)?;
+            data.extend_from_slice(&buf);
+        }
+        data.truncate(file_record.data_fork.size_in_bytes as usize);
     }
-
-    for extent in &file_record.data_fork.extents {
-        if extent.lenght == 0 {break};
-        println!("-- [EXTENT] Begin: {}, Lenght: {}, iBlock: {}", extent.begin, extent.lenght, extent.iblock);
-
-        let offset = extent.begin * 4096;
-        let size = extent.lenght * 4096;
-
-        file.seek(SeekFrom::Start(offset))?;
-        let mut buf = vec![0u8; size as usize];
-        file.read_exact(&mut buf)?;
-        data.extend_from_slice(&buf);
-    }
-    data.truncate(file_record.data_fork.size_in_bytes as usize);
 
     if (file_record.common.flags & VDFS4_COMPRESSED_FILE) != 0 {
         println!("- [COMPRESSED FILE]");
@@ -336,17 +337,37 @@ fn decompress_data(data: &[u8]) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
             , descr.magic, descr.extents_num, descr.layout_version, descr.unpacked_size, descr.log_chunk_size);
 
     //For magic
-    //First letter is always C
+    //first letter - auth type:
+    // C - none 
+    // I - md5 auth
+    // H - sha1 auth
+    // h - sha256 auth
+    let hash_len = match descr.magic[0] {
+        b'C' => 0,   
+        b'I' => 16 , //VDFS4_MD5_HASH_LEN
+        b'H' => 20,  //VDFS4_SHA1_HASH_LEN
+        b'h' => 32,  //VDFS4_SHA256_HASH_LEN
+        _ => return Err("unknown/invalid hash type".into())
+    };
+
+    //rest - compression type:
     //Zip - zlib
     //Gzp - gzip
     //Lzo - lzo
     //Zst - zstd
-    if &descr.magic != b"CZip" {
+    if &descr.magic[1..] != b"Zip" {
         return Err("only zlib supported".into());
-    }
+    } 
+
+    let sign_len = match descr.sign_type {
+        0x0 => 0,
+        0x1 => 128, //VDFS4_RSA1024_SIGN_LEN
+        0x2 => 256, //VDFS4_RSA2048_SIGN_LEN
+        _ => return Err("unknown/invalid sign_type".into())
+    };
 
     //seek to start of extents
-    data_reader.seek(SeekFrom::End(-40 - (descr.extents_num as i64 * 16)))?;
+    data_reader.seek(SeekFrom::End(-40 -sign_len -((descr.extents_num as i64 +1) * hash_len) /* each extent has hash +1 for descriptor */ -(descr.extents_num as i64 * 16)))?;
     let mut extents: Vec<Vdfs4CompExtent> = Vec::new();
     for i in 0..descr.extents_num {
         let extent: Vdfs4CompExtent = data_reader.read_le()?;
